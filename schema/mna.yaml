@@ -1,0 +1,607 @@
+name: "mna_transaction"
+version: "v1.0.1"
+description: "MnA Transaction Extraction Schema"
+
+llm:
+  service_model: "universal-extraction-service-primary"
+  seed: 42
+
+prompt:
+  system_prompt: |
+    You are an expert M&A data extraction specialist. Your task is to extract structured information about mergers and acquisitions transactions from financial documents. You must extract information *exactly as stated* in the document, without inference, calculation, or external knowledge.
+
+    ## Core Extraction Rules & Pre-Extraction Checklist
+
+    1.  **Transaction Identification**: Each distinct target company mentioned defines a unique transaction.
+        *   **PRE-EXTRACTION CHECK**: Identify all *unique target companies* mentioned. Each will correspond to one transaction object.
+    2.  **Multi-Party Extraction**: When multiple entities share the same role (e.g., joint acquirors, multiple sellers), extract them as arrays of objects with each entity's complete information.
+    3.  **Array Alignment**: For entity groups (acquirors, sellers, etc.), ensure all related fields have the same number of array items. Use null values where information is missing for a specific entity.
+    4.  **Verbatim Extraction**: Extract values *verbatim*. No paraphrasing, rounding, or simplification.
+    5.  **Null Handling**: Return `null` for fields genuinely not found. For array items, use null at the appropriate index.
+    6.  **Array Handling**: Return `[]` for array fields if no values are found. Each array item should have its own metadata (raw_value, confidence_score, citations).
+
+    ## Field Citation Requirement
+    For every extracted value, include the `statement_id(s)` in its `citations` list. Statements are marked as `[Statement N]`.
+
+    ## Field-Specific Extraction & Validation Reminders
+
+    Pay close attention to the following fields, ensuring precise and complete extraction.
+
+    *   **`acquiror_legal_name`**: The *full, official legal name* of the acquiring entity. Prioritize specific legal names over common names or parent companies if a subsidiary is the acquiror.
+    *   **`target_legal_name`**: The *full, official legal name* of the target entity.
+    *   **`target_ticker`**: The *explicitly stated* stock ticker symbol of the target. Return `null` if private or not explicitly mentioned.
+    *   **`target_country`**: The target company's primary country of incorporation/headquarters, *as explicitly stated*. If inferred from direct context (e.g., address), ensure it's unambiguous.
+    *   **`acquiror_state_province`**: The acquiror's primary state/province of incorporation/headquarters, *as explicitly stated*. Return `null` if not found.
+    *   **`consideration_size`**: The *exact numerical value* of the transaction, including currency and unit (e.g., "$1.25 billion").
+    *   **`pct_shares_acquired`**: The *exact percentage* of shares acquired, including decimals (e.g., "60.5%").
+    *   **`pct_shares_owned_post_deal_completion`**: The acquiror's *exact ownership percentage after* the deal (e.g., "75.25%").
+    *   **`deal_rationale`**: A direct, factual summary of the *strategic reasons* for the acquisition, *as stated* in the document. Avoid inference.
+    *   **`deal_summary`**: A factual overview of the transaction (who, what, when, key financials), *directly from the document*.
+    *   **`source_of_funding_summary`**: A factual summary of *how the deal is financed*, *as stated* in the document.
+
+    ## Few-Shot Examples for Problematic Fields
+
+    Review these examples to understand the expected level of precision and detail for challenging fields.
+
+    ### Example 1: Multiple Entities Extraction
+    **Text Snippet:**
+    `[Statement 1] "Alpha Corporation and [Statement 2] Beta Holdings Inc., both incorporated in [Statement 3] Delaware, announced their joint intent to acquire [Statement 4] Gamma Solutions Ltd., headquartered in [Statement 5] Ireland."`
+    **Expected Extraction:**
+    ```json
+    {
+      "acquirors": [
+        {
+          "name": { "raw_value": "Alpha Corporation", "confidence_score": 0.95, "citations": [1] },
+          "legal_name": { "raw_value": "Alpha Corporation", "confidence_score": 0.95, "citations": [1] },
+          "state_province": { "raw_value": "Delaware", "confidence_score": 0.92, "citations": [3] }
+        },
+        {
+          "name": { "raw_value": "Beta Holdings Inc.", "confidence_score": 0.94, "citations": [2] },
+          "legal_name": { "raw_value": "Beta Holdings Inc.", "confidence_score": 0.94, "citations": [2] },
+          "state_province": { "raw_value": "Delaware", "confidence_score": 0.92, "citations": [3] }
+        }
+      ],
+      "target_legal_name": { "raw_value": "Gamma Solutions Ltd.", "confidence_score": 0.96, "citations": [4] },
+      "target_country": { "raw_value": "Ireland", "confidence_score": 0.93, "citations": [5] }
+    }
+    ```
+    **Explanation:** Multiple acquirors extracted as array of objects, each with complete metadata.
+
+    ### Example 2: Consideration Size & Percentages
+    **Text Snippet:**
+    `[Statement 5] "The deal is valued at [Statement 6] USD 1.75 billion. This transaction will result in [Statement 7] Gamma Inc. holding [Statement 8] 75.3% of Beta's shares, having acquired an additional [Statement 9] 40.05% stake."`
+    **Expected Extraction:**
+    ```json
+    {
+      "consideration_size": { "value": "USD 1.75 billion", "citations": ["6"] },
+      "pct_shares_owned_post_deal_completion": { "value": "75.3%", "citations": ["8"] },
+      "pct_shares_acquired": { "value": "40.05%", "citations": ["9"] }
+    }
+    ```
+    **Explanation:** Exact numerical values, currency, units, and decimal precision for percentages are maintained. `pct_shares_acquired` and `pct_shares_owned_post_deal_completion` are correctly differentiated.
+
+    ### Example 3: Summary Fields & Ticker
+    **Text Snippet:**
+    `[Statement 10] "Delta Corp. (NYSE: DELTA) announced today it would acquire private firm [Statement 11] Epsilon Holdings for [Statement 12] $500 million cash. [Statement 13] The acquisition enhances Delta's market presence in renewable energy. [Statement 14] The deal will be financed through existing cash reserves and a new credit facility."`
+    **Expected Extraction:**
+    ```json
+    {
+      "acquiror_legal_name": { "value": "Delta Corp.", "citations": ["10"] },
+      "target_legal_name": { "value": "Epsilon Holdings", "citations": ["11"] },
+      "target_ticker": { "value": null, "citations": [] },
+      "consideration_size": { "value": "$500 million", "citations": ["12"] },
+      "deal_rationale": { "value": "The acquisition enhances Delta's market presence in renewable energy.", "citations": ["13"] },
+      "source_of_funding_summary": { "value": "existing cash reserves and a new credit facility", "citations": ["14"] },
+      "deal_summary": { "value": "Delta Corp. announced today it would acquire private firm Epsilon Holdings for $500 million cash.", "citations": ["10", "11", "12"] }
+    }
+    ```
+    **Explanation:** `target_ticker` is `null` because Epsilon is private. `deal_rationale` and `source_of_funding_summary` are direct quotes. `deal_summary` combines key facts from the intro.
+
+    ## Post-Extraction Review Points:
+    *   **Completeness**: All fields attempted?
+    *   **Accuracy**: Numeric values, units, currency, decimals checked?
+    *   **Formatting**: Entity names full and correct?
+    *   **Citation**: All values linked to `citations`?
+
+    ---
+
+  template: |
+    Extract M&A transaction information from the following document:
+
+    {{ text }}
+    
+    Return a complete extraction following the schema structure with all available information.
+
+schema:
+  field_metadata:
+    enable_citations: true
+    enable_confidence_scoring: true
+    # Additional metadata fields can be added here as needed
+    # Services will introspect the schema structure directly to determine
+    # which fields need flattening or alignment
+
+  fields:
+    # === MATERIAL DEAL DATES ===
+    undisturbed_target_share_price_date:
+      type: DateField
+      description: "The last date when the deal participants' share prices were unaffected by the announced or rumored transaction. This is typically the reference date for calculating deal premiums. Usually corresponds to the start date of volume-weighted price calculations mentioned in the document."
+
+    deal_rumor_date:
+      type: DateField
+      description: "The date when rumors or speculation about a potential transaction first became public, regardless of whether the acquiror was known. Look for phrases like 'rumors began', 'first reported', or 'sources indicate' in news articles or market commentary."
+
+    bid_date:
+      type: DateField
+      description: "The date when a formal offer or bid was made by the acquiror to the target. Look for phrases like 'submitted a bid', 'made an offer', or 'proposed to acquire' in transaction disclosures."
+
+    letter_of_intent_date:
+      type: DateField
+      description: "The date when the letter of intent (LOI) or term sheet was signed between the parties. Look for phrases like 'executed a letter of intent', 'signed an LOI', or 'entered into a term sheet'."
+
+    agreement_signing_date:
+      type: DateField
+      description: "The date when the definitive merger or purchase agreement was formally signed by both parties. Typically found in regulatory filings (8-K, proxy statements) rather than press releases. Look for 'executed a definitive agreement' or 'signed a merger agreement'."
+
+    deal_announcement_date:
+      type: DateField
+      description: "The date when the transaction was first publicly announced. Usually found in press release headers or opening paragraphs with phrases like 'announced today', 'today announced', or date stamps on announcement documents."
+
+    expected_completion_timeframe:
+      type: TextField
+      description: "The anticipated timeframe for closing the transaction as stated at announcement. Often expressed as a period (e.g., 'Q2 2025', 'second half of the year', 'by year-end') rather than a specific date. Different from the actual completion date."
+
+    revision_date:
+      type: DateField
+      description: "The date when the terms of an outstanding bid or existing agreement were materially revised. Look for phrases like 'amended the agreement', 'revised the offer', or 'modified the terms'."
+
+    cancellation_date:
+      type: DateField
+      description: "The date when a proposed or announced transaction was formally cancelled or abandoned. Look for phrases like 'terminated the agreement', 'cancelled the transaction', or 'abandoned the deal'."
+
+    completion_date:
+      type: DateField
+      description: "The date when the transaction officially closed and control transferred to the acquiror. Look for phrases like 'transaction closed', 'acquisition completed', or 'deal finalized'. May be expressed as a specific date or relative timeframe."
+
+    # === DEAL FEATURES ===
+    deal_type:
+      type: enum
+      enum:
+        - acquisition
+        - merger of equals
+        - minority stake acquisition
+        - majority stake acquisition
+        - asset purchase
+        - spac/reverse merger
+        - sale/divestiture/spin-off
+        - unknown
+      description: "The category of business combination structure. Use one of these values: 'acquisition', 'merger of equals', 'minority stake acquisition', 'majority stake acquisition', 'asset purchase', 'spac/reverse merger', 'sale/divestiture/spin-off'. When a company is acquiring another company outright, use 'acquisition'. For joint transactions creating a new combined entity, use 'merger of equals'. For partial ownership, specify minority or majority stake. if you cannot determine the structure, use 'unknown'."
+
+    deal_status:
+      type: enum
+      enum:
+        - rumored
+        - bid
+        - announced
+        - formally announced
+        - completed
+        - cancelled
+        - expired
+        - revised
+        - unknown
+      description: "The current transaction status as of the document date. Use one of these values: 'rumored', 'bid', 'announced', 'formally announced', 'completed', 'cancelled', 'expired', 'revised'. Use 'announced' or 'formally announced' when a transaction has been publicly announced. Use 'completed' when the deal has closed. Use 'rumored' for unconfirmed speculation, 'bid' for formal offers, 'cancelled' for terminated deals. Use 'revised' when terms have been materially changed. If the status cannot be determined, use 'unknown'."
+
+    deal_attitude:
+      type: enum
+      enum:
+        - friendly
+        - hostile
+        - unknown
+      description: "Whether the target's board and management support the transaction. Use one of these values (lowercase): 'friendly', 'hostile', 'unknown'. Look for phrases like 'board unanimously approved' or 'recommended by the board' (friendly), 'unsolicited offer' or 'rejected the bid' (hostile). More commonly found in regulatory filings than press releases. Use 'unknown' if not stated."
+
+    deal_summary:
+      type: TextField
+      description: "Extract a concise summary of the transaction from the document text (1-2 sentences). Look for overview statements that describe who is acquiring whom, the transaction value if disclosed, and the type of deal. Common in opening paragraphs or executive summary sections. If no explicit summary exists, return null - do not generate or synthesize content."
+
+    deal_rationale:
+      type: TextField
+      description: "Extract the strategic reasoning for the transaction as stated in the document (2-3 sentences maximum). Look for explicit sections or statements explaining 'strategic benefits', 'synergies', 'growth opportunities', 'market expansion', or direct quotes from executives about the deal's purpose. Common in press release body text or 'About the Transaction' sections. Extract only what is explicitly stated - do not infer or synthesize rationale."
+
+
+    # === DEAL PARTICIPANT DETAILS ===
+
+    acquirors:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: EntityField
+            description: "The company or entity purchasing or merging with the target, as referred to in the document. Extract the name exactly as stated (may include abbreviations or informal names)."
+          legal_name:
+            type: EntityField
+            description: "The full legal registered name of the acquiror entity. Often includes corporate designations like 'Inc.', 'LLC', 'Corporation', 'plc'. May appear in formal sections or regulatory disclosures."
+          entity_type:
+            type: TextField
+            description: "The type of company making the acquisition/purchase. Prioritize types like 'Corporate Entity', ‘Investment Firm’, 'Non-profit Organization', 'Government Agency', ‘Unknown’. If none of these fit and a different type is explicitly mentioned, extract that; otherwise, leave it blank. "
+          ticker:
+            type: TextField
+            description: "The stock exchange ticker symbol for the acquiror (e.g., 'MSFT', 'GOOGL'). Typically found in parentheses after company name or in financial sections. Only applicable for publicly traded entities."
+          country:
+            type: TextField
+            description: "The country where the acquiror is headquartered or incorporated. Look for phrases like 'based in', 'headquartered in', or country names in company descriptions."
+          state_province:
+            type: TextField
+            description: "The state or province where the acquiror is located within its country (e.g., 'California', 'New York', 'Ontario'). Typically found alongside city in headquarters descriptions."
+      description: "List of acquiring entities. For joint acquirors or multiple acquiring parties, extract each as a separate object in the array with all available details. Each acquiror should have its own metadata (confidence scores and source statement IDs)."
+
+    acquiror_ultimate_parents:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: EntityField
+            description: "The top-level parent company that owns or controls the acquiror entity, if different from the acquiror. Look for phrases like 'a subsidiary of', 'owned by', 'portfolio company of'. May be found in 'About' sections or parenthetical disclosures."
+          legal_name:
+            type: EntityField
+            description: "The full legal registered name of the acquiror's ultimate parent entity. Often includes corporate designations. May appear in regulatory sections discussing corporate structure."
+          entity_type:
+            type: TextField
+            description: "The company, investment firm(s), or other entity represented as the ultimate parent of the Acquirer in the transaction. It Can be explicitly referenced in the 'Parties to the Merger' section of the prospectus."
+          ticker:
+            type: TextField
+            description: "The stock ticker of the acquiror's ultimate parent company, if publicly traded."
+          country:
+            type: TextField
+            description: "The country where the acquiror's ultimate parent is headquartered or incorporated."
+          state_province:
+            type: TextField
+            description: "The state or province where the acquiror's ultimate parent is located."
+      description: "List of ultimate parent companies of the acquirors. Extract each parent as a separate object if multiple acquirors have different parents. Ensure alignment with the acquirors array."
+
+    target:
+      type: object
+      properties:
+        name:
+          type: EntityField
+          description: "The company or entity being acquired or merged, as referred to in the document. Extract exactly as stated. This is the central entity of the transaction."
+        legal_name:
+          type: EntityField
+          description: "The full legal registered name of the target entity. Often includes corporate designations like 'Inc.', 'LLC', 'Corporation', 'Limited'. May appear in formal transaction documents or regulatory sections."
+        entity_type:
+          type: TextField
+          description: "The type of company / asset being acquired/sold. Prioritize types like 'Corporate Entity', 'Real Estate (Land/Property/Commercial Site)', 'Brand', 'Other Non-Tangible Assets', 'Business Unit/Project', 'Physical Assets', 'Unknown'. If none of these fit and a different type is explicitly mentioned, extract that otherwise, leave this field blank."
+        ticker:
+          type: TextField
+          description: "The stock exchange ticker symbol for the target, if publicly traded. Typically found in parentheses after company name or in financial sections. Empty for private companies."
+        country:
+          type: TextField
+          description: "The country where the target is headquartered or incorporated. Look for geographical context in company descriptions or operations sections."
+        state_province:
+          type: TextField
+          description: "The state or province where the target is located within its country. Typically found alongside city in headquarters or operations descriptions."
+      description: "The target entity being acquired or merged. Extract all available information about the target company. Note: Each transaction has only one distinct target."
+
+    sellers:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: EntityField
+            description: "The entity selling the target or its assets, if different from the target itself. Often a parent company, private equity firm, or investor divesting assets. Look for phrases like 'selling', 'divesting from', 'exiting investment in'. May be omitted if seller and target are the same."
+          legal_name:
+            type: EntityField
+            description: "The full legal registered name of the seller entity. Often includes corporate designations. May appear in transaction agreement sections or regulatory filings."
+          entity_type:
+            type: TextField
+            description: "The type of company selling the stake. Prioritize types like 'Corporate Entity', ‘Investment Firm’, 'Non-profit Organization', 'Government Agency', ‘Unknown’. If none of these fit and a different type is explicitly mentioned, extract that; otherwise, leave it blank. "
+          ticker:
+            type: TextField
+            description: "The stock ticker of the seller, if publicly traded."
+          country:
+            type: TextField
+            description: "The country where the seller is headquartered or incorporated."
+          state_province:
+            type: TextField
+            description: "The state or province where the seller is located."
+      description: "List of selling entities. Extract each seller as a separate object if multiple parties are selling their stakes. Each seller should have its own metadata."
+
+    seller_ultimate_parents:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: EntityField
+            description: "The top-level parent company that owns or controls the seller entity, if applicable and different from the seller. Look for ownership structure disclosures."
+          legal_name:
+            type: EntityField
+            description: "The full legal registered name of the seller's ultimate parent entity. May appear in corporate structure sections."
+          entity_type:
+            type: TextField
+            description: "The company, investment firm(s) presented as the parent of the seller in the transaction."
+          ticker:
+            type: TextField
+            description: "The stock ticker of the seller's ultimate parent company, if publicly traded."
+          country:
+            type: TextField
+            description: "The country where the seller's ultimate parent is headquartered."
+          state_province:
+            type: TextField
+            description: "The state or province where the seller's ultimate parent is located."
+      description: "List of ultimate parent companies of the sellers. Extract each parent as a separate object if multiple sellers have different parents. Ensure alignment with the sellers array."
+
+    # === DEAL CONSIDERATION ===
+
+    target_shares_outstanding_pre_announcement:
+      type: NumericField
+      description: "The total number of target company shares outstanding before the deal was announced. Typically disclosed only for public companies in announcement documents or referenced from recent filings. Look for phrases like 'outstanding shares', 'shares issued and outstanding', or 'fully diluted shares'."
+
+    target_shares_outstanding_pre_announcement_type:
+      type: enum
+      enum:
+      - basic
+      - diluted
+      - fully diluted (treasury method)
+      description: "The calculation method for shares outstanding. IMPORTANT: Use one of these values: 'basic', 'diluted', 'fully diluted (treasury method)'. basic = common shares only; diluted = includes in-the-money options/warrants; fully diluted = all potential equity securities. May be specified explicitly or implied by context."
+
+    pct_shares_owned_by_acquiror_pre_announcement:
+      type: PercentageField
+      description: "The percentage of target equity already owned by the acquiror before announcing the current transaction. Look for phrases like 'currently owns', 'existing stake of', or 'owns approximately X% of'. Often mentioned when acquiror increases ownership."
+
+    pct_shares_acquired:
+      type: PercentageField
+      description: "The percentage of target equity the acquiror will acquire in THIS transaction only (the increment being purchased). Look for explicit statements like 'will acquire X%', 'purchasing X% stake', or 'acquiring the remaining X%'. IMPORTANT: Extract only the percentage being purchased in this deal, NOT the total final ownership. If the document states 'acquiring the remaining 60%', extract 60. Do not calculate or infer - extract only explicitly stated percentages."
+
+    pct_shares_owned_post_deal_completion:
+      type: PercentageField
+      description: "The total percentage of target equity the acquiror will own AFTER this transaction completes (cumulative ownership). Look for explicit statements like 'will own X%', 'resulting in X% ownership', 'bringing total stake to X%', or 'will hold X%'. IMPORTANT: Extract only when explicitly stated. This is typically pre-announcement ownership + pct_shares_acquired. Do not calculate - extract only if the document directly states the final ownership percentage."
+
+    announced_purchase_price_per_share:
+      type: array
+      items:
+        type: object
+        properties:
+          price:
+            type: NumericField
+            description: "The price per share offered for target stock, expressed as either a cash amount (e.g., '$50 per share') or stock exchange ratio (e.g., '0.5 shares of acquiror per target share')."
+          source:
+            type: enum
+            enum:
+            - cash only
+            - stock only
+            - combination
+            description: "The form of consideration for this price option. IMPORTANT: Use standardized lowercase terms: 'cash only' (for all-cash offers like '$50 in cash'), 'stock only' (for all-stock exchanges like '0.5 shares'), 'combination' (for mixed cash and stock like '$25 cash plus 0.25 shares'). EXTRACTION RULE: When the price mentions 'in cash' or 'cash per share', extract 'cash only'. When it mentions 'shares' or 'stock exchange', extract 'stock only'. When it mentions both cash and stock/equity, extract 'combination'."
+      description: "List of purchase price options offered for target stock. For deals with multiple pricing options (e.g., cash election vs stock election), extract each option as a separate object in the array with both the price and its source type. Look for phrases like 'at $X per share in cash', 'exchange ratio of X', or 'price of $X'."
+
+    number_of_target_shares_sought:
+      type: NumericField
+      description: "The specific count of target shares the acquiror intends to purchase. Most common in public company acquisitions. Look for phrases like 'acquiring X million shares', 'purchasing X shares', or specific share counts in tender offer details."
+
+    number_of_acquiror_issued_shares:
+      type: NumericField
+      description: "The count of new acquiror shares to be issued as stock consideration. Only applicable for stock or mixed deals. Look for phrases like 'will issue X shares', 'issuing X million shares', or stock issuance details."
+
+    consideration_size:
+      type: NumericField
+      description: "The total transaction value excluding earnouts and contingent payments. Also called 'equity value', 'purchase price', or 'transaction value'. Look for explicit statements like 'transaction valued at $X', 'purchase price of $X', 'for approximately $X [million/billion]', or 'acquiring for $X'. IMPORTANT: Extract the numeric value and preserve the unit context (millions vs billions). Common formats: '$500 million', '$1.2 billion', '$50M', '$1.2B'. If presented as a range, use consideration_size_min and consideration_size_max fields. This represents payment to shareholders only, excluding assumed debt."
+
+    consideration_size_min:
+      type: NumericField
+      description: "Minimum consideration size when presented as a range."
+
+    consideration_size_max:
+      type: NumericField
+      description: "Maximum consideration size when presented as a range."
+
+    contingent_payment_amount:
+      type: NumericField
+      description: "Additional payments tied to future performance milestones (earnouts) or other contingent conditions. Look for phrases like 'earn-out of up to $X', 'additional consideration of $X upon', 'contingent payment', or 'up to $X based on performance'. Often expressed as a maximum cap."
+
+    contingent_payment_amount_min:
+      type: NumericField
+      description: "Minimum contingent payment amount when presented as a range."
+
+    contingent_payment_amount_max:
+      type: NumericField
+      description: "Maximum contingent payment amount when presented as a range."
+
+    contingent_payment_timeframe:
+      type: TextField
+      description: "The duration over which earnout payments may be achieved. Look for phrases like 'over the next 3 years', 'within 24 months of closing', or specific timeframes tied to milestone achievement. Extract exactly as stated."
+
+    adjusted_consideration_size:
+      type: NumericField
+      description: "Total consideration including both upfront payment and maximum potential earnouts/contingent payments. Look for phrases like 'total potential consideration of $X', 'up to $X including earnouts', or calculations that add base consideration plus contingent amounts."
+
+    stock_consideration_amount:
+      type: NumericField
+      description: "The monetary value of consideration paid in acquiror stock. Look for phrases like '$X million in stock', 'stock consideration of $X', or '$X worth of shares'. Extract only when stated as a dollar amount, not percentage."
+
+    stock_consideration_min:
+      type: NumericField
+      description: "Minimum stock consideration amount when presented as a range."
+
+    stock_consideration_max:
+      type: NumericField
+      description: "Maximum stock consideration amount when presented as a range."
+
+    stock_consideration_pct:
+      type: PercentageField
+      description: "The proportion of total consideration paid in acquiror stock, expressed as a percentage. Look for phrases like 'X% in stock', 'X percent equity consideration', or '100% stock deal'. Use when consideration mix is expressed as percentages."
+
+    cash_consideration_amount:
+      type: NumericField
+      description: "The monetary value of consideration paid in cash. Look for phrases like '$X million in cash', 'cash consideration of $X', or 'cash payment of $X'. Extract only when stated as a dollar amount, not percentage."
+
+    cash_consideration_min:
+      type: NumericField
+      description: "Minimum cash consideration amount when presented as a range."
+
+    cash_consideration_max:
+      type: NumericField
+      description: "Maximum cash consideration amount when presented as a range."
+
+    cash_consideration_pct:
+      type: PercentageField
+      description: "The proportion of total consideration paid in cash, expressed as a percentage. Look for phrases like 'X% in cash', 'X percent cash consideration', or 'all-cash deal'. Use when consideration mix is expressed as percentages."
+
+    target_debt_assumed:
+      type: NumericField
+      description: "Total debt obligations on the target's balance sheet that the acquiror will assume. Look for phrases like 'assuming $X of debt', 'target debt of $X', or 'net of $X in debt'. Common in deal announcements, especially for leveraged targets."
+
+    current_portion_of_long_term_debt_assumed:
+      type: NumericField
+      description: "The portion of long-term debt due within one year on the target's balance sheet. Rarely disclosed in announcements; typically found in detailed SEC filings, proxy statements, or financial presentations."
+
+    short_term_debt_assumed:
+      type: NumericField
+      description: "Debt obligations due within one year on the target's balance sheet. Infrequently disclosed in announcements; typically found in detailed financial disclosures or SEC filings."
+
+    long_term_debt_assumed:
+      type: NumericField
+      description: "Debt obligations due beyond one year on the target's balance sheet. Rarely disclosed in announcements; typically found in detailed financial statements or regulatory filings."
+
+    capital_leases_assumed:
+      type: NumericField
+      description: "Capitalized lease obligations on the target's balance sheet. Rarely disclosed separately in announcements; typically found in detailed financial statements or notes to financial statements."
+
+    less_cash_assumed:
+      type: NumericField
+      description: "Cash and cash equivalents on the target's balance sheet at transaction time. Used to calculate net debt. Look for phrases like 'less cash of $X', 'net of $X cash', or references to target cash balances. More common in detailed disclosures."
+
+    target_net_debt_assumed:
+      type: NumericField
+      description: "Total debt minus cash on the target's balance sheet (Debt - Cash). Look for phrases like 'net debt of $X', 'assuming net debt of $X', or 'target net debt'. Often disclosed in announcements when calculating enterprise value."
+
+    preferred_equity_assumed:
+      type: NumericField
+      description: "Preferred stock or equity on the target's balance sheet. Rarely disclosed in announcements; typically found in detailed financial statements or capital structure descriptions in regulatory filings."
+
+    minority_interest_assumed:
+      type: NumericField
+      description: "Non-controlling ownership interests in target subsidiaries shown on the balance sheet. Rarely disclosed in announcements; typically found in detailed financial statements or consolidated financials sections."
+
+    other_adjustments_to_enterprise_value:
+      type: NumericField
+      description: "Additional balance sheet items affecting enterprise value calculations (e.g., pension liabilities, tax benefits, unfunded obligations). Look for phrases like 'adjusted for $X', 'other adjustments of $X', or specific item callouts. Occasionally disclosed in detailed deal announcements."
+
+    deal_value:
+      type: NumericField
+      description: "Enterprise value (EV) of the transaction, also called 'Transaction Value' or 'Total Deal Value'. Equals consideration plus net debt. Look for phrases like 'enterprise value of $X', 'transaction value of $X', or 'total deal value'. Not typically used for banks or financial institutions."
+
+    total_enterprise_value_revenue:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as EV/Revenue (e.g., '5.2x revenue'). Look for phrases like 'EV/Revenue multiple of X.Xx', 'X times revenue', or 'valued at Xx revenue'. Common in technology and growth company deals."
+
+    total_enterprise_value_ebitda:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as EV/EBITDA (e.g., '12.5x EBITDA'). Look for phrases like 'EV/EBITDA multiple of X.Xx', 'X times EBITDA', or 'valued at Xx EBITDA'. The most commonly disclosed valuation metric."
+
+    total_enterprise_value_ebit:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as EV/EBIT (e.g., '15.0x EBIT'). Look for phrases like 'EV/EBIT multiple of X.Xx', 'X times EBIT', or 'valued at Xx EBIT'. Less common than EV/EBITDA."
+
+    total_enterprise_value_ffo:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as EV/FFO (Funds From Operations). Specific to REIT (Real Estate Investment Trust) acquisitions. Look for phrases like 'EV/FFO multiple of X.Xx' or 'X times FFO' in REIT deal announcements."
+
+    price_to_book_value:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as Price/Book Value (e.g., '1.5x book'). Specific to bank and financial institution acquisitions. Look for phrases like 'P/B multiple of X.Xx', 'X times book value', or 'valued at Xx book'."
+
+    price_to_tangible_book_value:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as Price/Tangible Book Value (e.g., '2.0x tangible book'). Specific to bank acquisitions, excludes intangible assets. Look for phrases like 'P/TBV multiple of X.Xx' or 'X times tangible book value'."
+
+    price_to_earnings:
+      type: NumericField
+      description: "Transaction valuation multiple expressed as Price/Earnings or P/E ratio (e.g., '18.5x earnings'). Look for phrases like 'P/E multiple of X.Xx', 'X times earnings', or 'valued at Xx earnings'. Less commonly disclosed than EV-based multiples."
+
+    # === SOURCES OF FUNDING ===
+
+    source_of_funding_summary:
+      type: TextField
+      description: "A brief textual description of how the acquiror plans to finance the cash portion of the deal. Look for sections titled 'Financing', 'Sources and Uses', or phrases like 'will be funded through', 'financing includes', or 'sources of funds'. More common in regulatory filings than press releases. Extract exactly as stated."
+
+    cash_on_hand_component_of_deal_funding:
+      type: NumericField
+      description: "The amount of transaction financing coming from the acquiror's existing cash reserves. Look for phrases like 'using cash on hand', 'from existing cash balances', or 'cash reserves of $X'. More typical in smaller deals. Usually disclosed in detailed merger agreements or financing sections."
+
+    bridge_loan_amount:
+      type: NumericField
+      description: "The amount of short-term debt (typically under 1 year) the acquiror will draw to fund the transaction, to be refinanced later with permanent financing. Look for phrases like 'bridge loan facility of $X', '$X bridge financing', or 'short-term borrowing'. More common in regulatory filings."
+
+    debt_funding_term_loan_amount:
+      type: NumericField
+      description: "The specific amount of funding raised through Term Loans (e.g., Term Loan A, Term Loan B) to finance the deal. Look for phrases like 'committed term loan facility of $X', 'entering into a $X term loan', or 'funded by a new term loan'. Exclude bridge loans (captured separately)."
+
+    debt_funding_senior_notes_amount:
+      type: NumericField
+      description: "The specific amount of funding raised through the issuance of Senior Notes or Senior Secured Notes. Look for phrases like 'offering $X aggregate principal amount of senior notes', 'issuing $X in senior notes', or 'placement of senior notes'."
+
+    debt_funding_subordinated_notes_amount:
+      type: NumericField
+      description: "The specific amount of funding raised through Subordinated or Junior Notes. These are lower in priority than senior debt. Look for phrases like 'issuance of $X subordinated notes' or 'junior debt financing of $X'."
+
+    debt_funding_convertible_notes_amount:
+      type: NumericField
+      description: "The specific amount of funding raised through Convertible Notes (debt that can be converted into equity). Look for phrases like 'offering of $X convertible senior notes' or 'sale of convertible debt'."
+
+    equity_funding_private_placement_amount:
+      type: NumericField
+      description: "The amount of cash raised by selling acquiror equity directly to private investors (often called a PIPE - Private Investment in Public Equity) to fund the cash portion of the deal. IMPORTANT: This is distinct from stock issued to target shareholders as consideration. Look for 'entered into subscription agreements for $X', 'PIPE financing of $X', or 'private placement of $X'."
+
+    equity_funding_public_placement_amount:
+      type: NumericField
+      description: "The amount of cash raised by selling acquiror equity to the public markets (Secondary Offering) specifically to fund this deal. Look for 'public offering of common stock to fund the acquisition', 'using proceeds from a $X equity offering', or 'registered direct offering'."
+
+    # === ADVISORS ===
+    acquiror_financial_advisors:
+      type: array
+      items:
+        type: TextField
+      description: "Investment banks or financial advisory firms advising the acquiror on the transaction. Look for phrases like 'advised by', 'financial advisor to acquiror', or firm names in 'About' sections. Typically disclosed in news articles or regulatory filings, not initial press releases. Extract each advisor as a separate array item."
+
+    seller_financial_advisors:
+      type: array
+      items:
+        type: TextField
+      description: "Investment banks or financial advisory firms advising the seller/target on the transaction. Look for phrases like 'advised by', 'financial advisor to seller/target', or 'represented by'. Often found in detailed deal announcements or regulatory filings. Extract each advisor as a separate array item."
+
+    acquiror_legal_advisors:
+      type: array
+      items:
+        type: TextField
+      description: "Law firms providing legal counsel to the acquiror. Look for phrases like 'legal advisor to acquiror', 'represented by', or firm names in legal sections. More common in regulatory filings or detailed news coverage. Extract each firm as a separate array item."
+
+    seller_legal_advisors:
+      type: array
+      items:
+        type: TextField
+      description: "Law firms providing legal counsel to the seller/target. Look for phrases like 'legal advisor to seller/target', 'represented by', or firm names. Often disclosed alongside financial advisors in detailed announcements. Extract each firm as a separate array item."
+
+    acquiror_auditors:
+      type: array
+      items:
+        type: TextField
+      description: "Accounting/audit firms advising the acquiror on financial due diligence or transaction accounting. Rarely disclosed in announcements; more often found in detailed regulatory filings or prospectuses. Extract each firm as a separate array item."
+
+    seller_auditors:
+      type: array
+      items:
+        type: TextField
+      description: "Accounting/audit firms advising the seller/target. Infrequently disclosed in announcements; typically found in detailed regulatory documents if at all. Extract each firm as a separate array item."
+
+    # === TERMINATION FEE ===
+
+    termination_fee_paid_by_acquiror:
+      type: NumericField
+      description: "The amount the acquiror must pay if they terminate the agreement or fail to close the deal (reverse termination fee). Look for phrases like 'reverse termination fee of $X', 'acquiror break-up fee', or 'payable by acquiror upon termination'. Typically disclosed in merger agreements, not press releases."
+
+    termination_fee_paid_by_target_seller:
+      type: NumericField
+      description: "The amount the target/seller must pay if they terminate the agreement or accept a superior offer (standard break-up fee). Look for phrases like 'termination fee of $X', 'break-up fee', or 'payable by target upon termination'. Typically disclosed in definitive merger agreements, rarely in initial announcements."
+
+

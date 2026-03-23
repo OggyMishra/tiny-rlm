@@ -1,0 +1,21 @@
+[project]
+name = "tiny-rlm"
+version = "0.1.0"
+description = "RLM-based M&A transaction extraction from financial documents"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["tiny_rlm*"]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"

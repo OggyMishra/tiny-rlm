@@ -1,0 +1,16 @@
+# tiny-rlm runtime configuration
+# Model names use LiteLLM format: provider/model
+
+# Model names: use LiteLLM format (provider/model) for direct API calls,
+# or proxy model group names when using LITELLM_BASE_URL proxy.
+primary_agent: "as-agent-gemini-3-flash"
+sub_agent: "as-agent-gemini-3-flash"
+
+max_depth: 2
+max_calls_per_subagent: 15
+truncate_len: 5000
+
+# Budget guards
+max_money_spent: 5.0
+max_completion_tokens: 200000
+max_prompt_tokens: 500000
