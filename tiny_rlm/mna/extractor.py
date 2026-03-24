@@ -1,11 +1,13 @@
 """M&A extraction orchestrator — wraps RLMEngine with M&A-specific prompts."""
 
+from __future__ import annotations
+
 import asyncio
-from typing import Any
 
 from tiny_rlm.config import RLMConfig, load_config
 from tiny_rlm.engine import RLMEngine
-from tiny_rlm.mna.models import ExtractionResult, MnATransaction, parse_extraction
+from tiny_rlm.logging.logger import RLMLogger
+from tiny_rlm.mna.models import ExtractionResult, parse_extraction
 from tiny_rlm.mna.prompts import build_mna_root_prompt
 from tiny_rlm.mna.schema import load_schema
 
@@ -19,10 +21,11 @@ class MnAExtractor:
         config_path: str = "rlm_config.yaml",
         schema_path: str | None = None,
         verbose: bool = True,
+        logger: RLMLogger | None = None,
     ):
         self.config = config or load_config(config_path)
         self.schema = load_schema(schema_path)
-        self.engine = RLMEngine(self.config, verbose=verbose)
+        self.engine = RLMEngine(self.config, verbose=verbose, logger=logger)
         self._system_prompt = build_mna_root_prompt(self.schema)
 
     async def extract_async(self, document_text: str) -> ExtractionResult:

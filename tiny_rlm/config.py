@@ -17,6 +17,9 @@ class RLMConfig:
     max_money_spent: float = 5.0
     max_completion_tokens: int = 200000
     max_prompt_tokens: int = 500000
+    log_level: str = "normal"
+    log_dir: str = "logs"
+    enable_jsonl: bool = True
 
 
 def load_config(path: str | Path = "rlm_config.yaml") -> RLMConfig:
