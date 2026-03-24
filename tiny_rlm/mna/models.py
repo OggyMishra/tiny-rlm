@@ -158,6 +158,7 @@ def parse_extraction(raw: Any) -> list[MnATransaction]:
         if isinstance(item, dict):
             flat = _flatten_metadata(item)
             _coerce_entity_fields(flat)
+            _coerce_numeric_to_str(flat)
             try:
                 transactions.append(MnATransaction.model_validate(flat))
             except Exception as e:
@@ -208,6 +209,22 @@ def _coerce_entity_fields(flat: dict) -> None:
                 flat["target"] = None
         elif isinstance(val, str):
             flat["target"] = {"name": val}
+
+
+# Fields that are str | None in MnATransaction but LLMs often return as int/float.
+_STR_FIELDS = {
+    name
+    for name, field_info in MnATransaction.model_fields.items()
+    if field_info.annotation in (str | None,)  # noqa: E721
+    or str(field_info.annotation) == "str | None"
+}
+
+
+def _coerce_numeric_to_str(flat: dict) -> None:
+    """Convert int/float values to str for fields typed as str | None."""
+    for key, val in flat.items():
+        if key in _STR_FIELDS and isinstance(val, (int, float)):
+            flat[key] = str(val)
 
 
 _MODEL_FIELDS = set(MnATransaction.model_fields.keys())
